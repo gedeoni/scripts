@@ -38,6 +38,8 @@ TOTAL_CPU_VAL=$(echo "$TOTAL_CPU" | awk '{printf "%.0f", $1}')
 RAM_LINE=$(echo "$STATS_SUMMARY" | grep "PhysMem")
 USED_RAM_STR=$(echo "$RAM_LINE" | awk '{print $2}')
 FREE_RAM_STR=$(echo "$RAM_LINE" | awk '{print $(NF-1)}')
+WIRED_STR=$(echo "$RAM_LINE" | awk '{print $4}' | tr -d '()')
+COMPR_STR=$(echo "$RAM_LINE" | awk '{print $6}')
 USED_RAM_MIB=$(to_mib "$USED_RAM_STR") # e.g., 4.0G
 FREE_RAM_MIB=$(to_mib "$FREE_RAM_STR") # e.g., 2.0G
 TOTAL_RAM_MIB=$(echo "$USED_RAM_MIB + $FREE_RAM_MIB" | bc -l)
@@ -100,6 +102,7 @@ p {
         count++; if(count==5) exit;
     }
 }'
+printf "Breakdown (Remainder): %s Wired, %s Compressed\n" "$WIRED_STR" "$COMPR_STR"
 
 echo -e "\n--- 🔋 TOP 5 BATTERY CONSUMERS ---"
 top -l 2 -stats command,power -o power -n 5 | awk '
