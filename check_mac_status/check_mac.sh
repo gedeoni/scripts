@@ -1,4 +1,5 @@
 #!/bin/bash
+# Author: Gedeon Niyonkuru (gedeoniyonkuru@gmail.com)
 
 # --- HELPER FUNCTIONS ---
 to_mib() { # Converts a storage value (e.g., "10G", "512M") to Mebibytes (MiB).
