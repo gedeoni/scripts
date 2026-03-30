@@ -4,19 +4,31 @@
 # --- DATA GATHERING ---
 $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-# 1. Disk Storage (C: Drive)
-$DriveC = Get-PSDrive C -ErrorAction SilentlyContinue
-if ($DriveC) {
-    $TotalDiskGB = [Math]::Round(($DriveC.Used + $DriveC.Free) / 1GB, 1)
-    $UsedDiskGB = [Math]::Round($DriveC.Used / 1GB, 1)
-    $FreeDiskGB = [Math]::Round($DriveC.Free / 1GB, 1)
-    $DiskPct = [Math]::Round(($DriveC.Used / ($DriveC.Used + $DriveC.Free)) * 100)
+# 1. Disk Storage (All Fixed Disks)
+$Disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue
+$DiskData = foreach ($Disk in $Disks) {
+    $TotalGB = [Math]::Round($Disk.Size / 1GB, 1)
+    $FreeGB = [Math]::Round($Disk.FreeSpace / 1GB, 1)
+    $UsedGB = [Math]::Round($TotalGB - $FreeGB, 1)
+    $PctUsed = if ($TotalGB -gt 0) { [Math]::Round(($UsedGB / $TotalGB) * 100) } else { 0 }
+    [PSCustomObject]@{
+        Drive = $Disk.DeviceID
+        Free  = $FreeGB
+        Total = $TotalGB
+        Pct   = $PctUsed
+    }
 }
 
-# 2. CPU Usage (Average over 1 second to avoid spikes)
+# 2. CPU Usage
 $CpuCounter = Get-Counter '\Processor(_Total)\% Processor Time' -ErrorAction SilentlyContinue
 $TotalCpuVal = if ($CpuCounter) { [Math]::Round($CpuCounter.CounterSamples[0].CookedValue) } else { 0 }
-$TopCpuProcs = Get-Process | Where-Object {$_.CPU -ne $null} | Sort-Object CPU -Descending | Select-Object -First 5 | Select-Object Name, @{Name='CPU';Expression={[Math]::Round($_.CPU, 1)}}
+
+# Get Top 5 CPU Processes using CIM for formatted percentage
+$TopCpuProcs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -ErrorAction SilentlyContinue | 
+    Where-Object { $_.Name -notmatch '^_Total$|^Idle$' } | 
+    Sort-Object PercentProcessorTime -Descending | 
+    Select-Object -First 5 | 
+    Select-Object @{Name='Name';Expression={$_.Name}}, @{Name='CPU';Expression={$_.PercentProcessorTime}}
 
 # 3. RAM Usage
 $OS = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
@@ -26,7 +38,9 @@ if ($OS) {
     $UsedRamGB = [Math]::Round($TotalRamGB - $FreeRamGB, 1)
     $RamPct = [Math]::Round(($UsedRamGB / $TotalRamGB) * 100)
 }
-$TopRamProcs = Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 5 | Select-Object Name, @{Name='RAM';Expression={[Math]::Round($_.WorkingSet64 / 1MB, 1)}}
+# Using PrivateMemorySize64 for Private Memory usage
+$TopRamProcs = Get-Process | Sort-Object PrivateMemorySize64 -Descending | Select-Object -First 5 | 
+    Select-Object Name, @{Name='RAM';Expression={[Math]::Round($_.PrivateMemorySize64 / 1MB, 1)}}
 
 # 4. Battery Status
 $Battery = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
@@ -40,14 +54,16 @@ if ($TotalCpuVal -gt 85) { $Summary = "[CRITICAL] CPU Load"; $StatusColor = "Red
 elseif ($TotalCpuVal -gt 60) { $Summary = "[HIGH] CPU Load"; $StatusColor = "Yellow" }
 elseif ($RamPct -gt 95) { $Summary = "[CRITICAL] RAM Usage"; $StatusColor = "Red" }
 elseif ($RamPct -gt 85) { $Summary = "[HIGH] RAM Usage"; $StatusColor = "Yellow" }
-elseif ($DiskPct -gt 90) { $Summary = "[CRITICAL] Disk Space Low"; $StatusColor = "Red" }
+elseif (($DiskData | Where-Object { $_.Pct -gt 90 }).Count -gt 0) { $Summary = "[CRITICAL] Disk Space Low"; $StatusColor = "Red" }
 
 # --- OUTPUT ---
 Write-Host "`n$Summary | Status as of $Timestamp" -ForegroundColor $StatusColor
 
 Write-Host "`n--- DISK STORAGE ---" -ForegroundColor Cyan
-if ($DriveC) {
-    Write-Host "Available: $($FreeDiskGB)GB / $($TotalDiskGB)GB ($DiskPct% used)"
+if ($DiskData) {
+    foreach ($d in $DiskData) {
+        Write-Host "Drive $($d.Drive): Available: $($d.Free)GB / $($d.Total)GB ($($d.Pct)% used)"
+    }
 } else {
     Write-Host "Error: Could not retrieve Disk information."
 }
@@ -56,16 +72,16 @@ Write-Host "`n--- CPU USAGE ---" -ForegroundColor Cyan
 Write-Host "Overall CPU Used: $TotalCpuVal%"
 Write-Host "Top 5 CPU Processes:"
 foreach ($p in $TopCpuProcs) {
-    Write-Host "  - $($p.Name.PadRight(20)) $($p.CPU)%"
+    Write-Host "  - $($p.Name.PadRight(25)) $($p.CPU)%"
 }
 
 Write-Host "`n--- RAM USAGE ---" -ForegroundColor Cyan
 if ($OS) {
     Write-Host "Available: $($FreeRamGB)GB / $($TotalRamGB)GB ($RamPct% used)"
 }
-Write-Host "Top 5 RAM Consumers (Private Working Set):"
+Write-Host "Top 5 RAM Consumers (Private Memory):"
 foreach ($p in $TopRamProcs) {
-    Write-Host "  - $($p.Name.PadRight(20)) $($p.RAM)MB"
+    Write-Host "  - $($p.Name.PadRight(25)) $($p.RAM)MB"
 }
 
 if ($HasBattery) {
@@ -76,7 +92,7 @@ if ($HasBattery) {
         if ($p.CPU -gt 50) { $Impact = "HIGH"; $ImpactColor = "Red" }
         elseif ($p.CPU -gt 20) { $Impact = "MODERATE"; $ImpactColor = "Yellow" }
         
-        Write-Host "$($p.Name.PadRight(25)) Impact Score: $($p.CPU.ToString().PadRight(5)) " -NoNewline
+        Write-Host "  - $($p.Name.PadRight(25)) Impact Score: $($p.CPU.ToString().PadRight(5)) " -NoNewline
         Write-Host "$Impact" -ForegroundColor $ImpactColor
     }
 
